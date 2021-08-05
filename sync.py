@@ -5,7 +5,17 @@ Thanks to Nestor Espinoza's lcogtDD for an example on syncing with LCO.
 
 """
 
+import io
 import os
+import sys
+import json
+import time
+import logging
+import argparse
+import requests
+from astropy.table import Table
+from astropy.time import Time
+import astropy.units as u
 
 
 class AuthorizationError(Exception):
@@ -30,21 +40,26 @@ class Sync:
     config_filg : string, optional
         Configuration file containing username and password.
 
+    post_sync : string, optional
+        Run this executable after downloading new files.
+
+    verbose : bool, optional
+        Send info messages to the console.
+
     debug : bool, optional
         Enable any debuging parameters.
 
     """
 
     def __init__(self, proposal, object=None,
-                 config_file='~/.config/lco-sync.config', debug=False):
-        import logging
-        import astropy.units as u
-        from astropy.time import Time
-        import json
-
+                 config_file='~/.config/lco-sync.config',
+                 post_sync=None, verbose=False, debug=False):
         self.download_path = './'
         self.proposal = proposal
         self.object = object
+        self.post_sync = post_sync
+        self.verbose = verbose
+        self.debug = debug
 
         self._logging(True)
 
@@ -59,12 +74,8 @@ class Sync:
         self._get_auth_token()
 
     def _logging(self, log_to_file):
-        import sys
-        import logging
-        from astropy.time import Time
-
         logger = logging.Logger('lco-sync')
-        logger.setLevel(logging.DEBUG)
+        log_level = logging.DEBUG if self.debug else logging.INFO
 
         # This test allows logging to work when it is run multiple times
         # from ipython
@@ -72,8 +83,8 @@ class Sync:
             formatter = logging.Formatter('%(levelname)s: %(message)s')
 
             console = logging.StreamHandler(sys.stdout)
-            console.setLevel(logging.DEBUG)
             console.setFormatter(formatter)
+            console.setLevel(log_level if self.verbose else logging.WARNING)
             logger.addHandler(console)
 
             if log_to_file:
@@ -82,8 +93,8 @@ class Sync:
                 fn = '/dev/null'
 
             logfile = logging.FileHandler(fn)
-            logfile.setLevel(logging.INFO)
             logfile.setFormatter(formatter)
+            logfile.setLevel(log_level)
             logger.addHandler(logfile)
 
         logger.info('#' * 70)
@@ -96,7 +107,6 @@ class Sync:
         self.logger = logger
 
     def log_table(self, tab):
-        import io
         with io.StringIO() as s:
             tab.write(s, format='ascii.fixed_width_two_line')
             s.seek(0)
@@ -115,8 +125,6 @@ class Sync:
         ArchiveFileAlreadyExists
 
         """
-        import os
-        import requests
 
         # first, verify target path and create subdirectories if needed
         d = self.download_path
@@ -143,8 +151,6 @@ class Sync:
                 outf.write(requests.get(meta['url']).content)
 
     def _get_auth_token(self):
-        import requests
-
         data = {
             'username': self.config['username'],
             'password': self.config['password']
@@ -156,9 +162,9 @@ class Sync:
             raise AuthorizationError('Authorization token not returned.')
 
         self.auth = {'Authorization': 'Token ' + token}
-        self.logger.info('Obtained authoriation token.')
+        self.logger.info('Obtained authorization token.')
 
-    def continuous_sync(self, rlevels=[11, 91], download=True):
+    def continuous_sync(self, rlevels=[91], download=True):
         """Continuously check for new data.
 
         Parameters
@@ -169,11 +175,7 @@ class Sync:
           Download flag.
 
         """
-
-        import time
-        from astropy.time import Time
-        import astropy.units as u
-
+        
         window = 1 * u.day  # search window
         cadence = 2 * u.hr  # search cadence
         last_sync = Time('2000-01-01')
@@ -213,9 +215,6 @@ class Sync:
           The HTTP get parameters.
 
         """
-        import time
-        from astropy.time import Time
-        import requests
 
         while (Time.now() - self.last_request) < self.request_delay:
             time.sleep(1)
@@ -229,24 +228,23 @@ class Sync:
 
     def _summarize_payload(self, payload):
         """Summarize payload as a table."""
-        from astropy.table import Table
 
-        tab = Table(names=('filename', 'date_obs', 'filter', 'exptime'),
-                    dtype=('U64', 'U32', 'U16', float))
+        tab = Table(names=('filename', 'date_obs', 'object', 'filter', 'exptime'),
+                    dtype=('U64', 'U32', 'U32', 'U16', float))
         for meta in payload:
-            tab.add_row((meta['filename'], meta['DATE_OBS'], meta['FILTER'],
-                         float(meta['EXPTIME'])))
+            tab.add_row((meta['filename'], meta['OBJECT'], meta['DATE_OBS'],
+                         meta['FILTER'], float(meta['EXPTIME'])))
         return tab
 
-    def sync(self, start, end=None, rlevels=[11, 91], download=True):
+    def sync(self, start=None, end=None, rlevels=[91], download=True):
         """Request frames list from LCO and download, if needed.
 
         Only whole days are checked.
 
         Parameters
         ----------
-        start : Time
-          Check for frames since `start`.
+        start : Time, optional
+          Check for frames since `start`.  Default is now - 24 hr.
         end : Time, optional
           Check for frames no later than `end`.
         rlevels : list of int, optional
@@ -260,8 +258,9 @@ class Sync:
           `True` if new files were downloaded.
 
         """
-        import os
-        from astropy.time import Time
+
+        if start is None:
+            start = Time.now() - 24 * u.hr
 
         new_files = False
         for rlevel in rlevels:
@@ -300,9 +299,11 @@ class Sync:
                                 skip_count += 1
                                 pass
                         if len(downloaded) > 0:
-                            self.log_table(tab[downloaded])
+                            #self.log_table(tab[downloaded])
+                            tab[downloaded].pprint_all()
                     else:
                         self.log_table(tab)
+                        tab.pprint_all()
 
                 if data['next'] is not None:
                     # get next payload set
@@ -313,34 +314,40 @@ class Sync:
             self.logger.info('{} Downloaded {} files, {} skipped.'.format(
                 Time.now().iso, dl_count, skip_count))
 
+            if dl_count > 0 and self.post_sync is not None:
+                os.system(self.post_sync)
+
             new_files += dl_count > 0
 
         return new_files
 
 
 if __name__ == '__main__':
-    import argparse
-    from astropy.time import Time
-
     parser = argparse.ArgumentParser()
     parser.add_argument('proposal',
                         help='LCO proposal ID')
-    parser.add_argument('-v', action='store_true')
     parser.add_argument('--since', type=Time,
                         help='find data in the archive since this date')
     parser.add_argument('--object',
                         help='only sync data matching this object')
+    parser.add_argument('--continuous', action='store_true',
+                        help='run in continuous sync mode')
+    parser.add_argument('--post-sync',
+                        help='run this executable after downloading new files')
+    parser.add_argument('--debug', action='store_true',
+                        help='enable debugging messages')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='show more messages on the console')
     args = parser.parse_args()
 
-    sync = Sync(args.proposal, object=args.object)
+    sync = Sync(args.proposal, object=args.object, post_sync=args.post_sync,
+                debug=args.debug, verbose=args.verbose)
     try:
-        if args.since:
-            sync.sync(args.since)
-        else:
+        if args.continuous:
             sync.continuous_sync()
+        else:
+            sync.sync(args.since)
     except Exception as e:
-        import logging
         sync.logger.error(str(e))
-
-        if args.v:
+        if args.verbose:
             raise(e)
