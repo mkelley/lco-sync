@@ -43,6 +43,9 @@ class Sync:
     post_sync : string, optional
         Run this executable after downloading new files.
 
+    login : bool, optional
+        Set to ``False`` and only public data will be searched.
+
     verbose : bool, optional
         Send info messages to the console.
 
@@ -53,11 +56,13 @@ class Sync:
 
     def __init__(self, proposal, object=None,
                  config_file='~/.config/lco-sync.config',
-                 post_sync=None, verbose=False, debug=False):
+                 post_sync=None, login=True, verbose=False,
+                 debug=False):
         self.download_path = './'
         self.proposal = proposal
         self.object = object
         self.post_sync = post_sync
+        self.login = login
         self.verbose = verbose
         self.debug = debug
 
@@ -71,7 +76,11 @@ class Sync:
         self.last_download = None
 
         # get http authorization token from LCO
-        self._get_auth_token()
+        if self.login:
+            self._get_auth_token()
+        else:
+            self.auth = None
+            self.logger.info('Not logged in, only searching public data.')
 
     def _logging(self, log_to_file):
         logger = logging.Logger('lco-sync')
@@ -160,7 +169,6 @@ class Sync:
         token = r.get('token')
         if token is None:
             raise AuthorizationError('Authorization token not returned.')
-
         self.auth = {'Authorization': 'Token ' + token}
         self.logger.info('Obtained authorization token.')
 
@@ -268,7 +276,8 @@ class Sync:
                 'PROPID': self.proposal,
                 'limit': 50,
                 'RLEVEL': rlevel,
-                'start': start.iso[:10]
+                'start': start.iso[:10],
+                'format': 'json'
             }
             if self.object is not None:
                 query['OBJECT'] = self.object
@@ -334,6 +343,9 @@ if __name__ == '__main__':
                         help='run in continuous sync mode')
     parser.add_argument('--post-sync',
                         help='run this executable after downloading new files')
+    parser.add_argument('--no-login', dest='login', action='store_false',
+                        help=('do not login to the data archive, limiting '
+                              'search to public data'))
     parser.add_argument('--debug', action='store_true',
                         help='enable debugging messages')
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -341,7 +353,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     sync = Sync(args.proposal, object=args.object, post_sync=args.post_sync,
-                debug=args.debug, verbose=args.verbose)
+                login=args.login, debug=args.debug, verbose=args.verbose)
     try:
         if args.continuous:
             sync.continuous_sync()
