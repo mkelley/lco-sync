@@ -1,5 +1,5 @@
 # lco-sync
-Download data from the LCO archive.  May be run once, or set to periodically check for new files.
+Download data from the LCO archive.  Maybe run once, or set to periodically check for new files.
 
 ## Requires
 * astropy
