@@ -125,7 +125,6 @@ class Sync:
                 logger.info("Logging to " + handler.baseFilename)
 
         self.logger = logger
-        breakpoint()
 
     def log_table(self, tab):
         with io.StringIO() as s:
