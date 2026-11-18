@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import pathlib
 import sys
 import time
 from subprocess import check_call
@@ -98,6 +99,7 @@ class Sync:
         # This test allows logging to work when it is run multiple times
         # from ipython
         if len(logger.handlers) == 0:
+            logger.setLevel(log_level)
             formatter = logging.Formatter("%(levelname)s: %(message)s")
 
             console = logging.StreamHandler(sys.stdout)
@@ -123,6 +125,7 @@ class Sync:
                 logger.info("Logging to " + handler.baseFilename)
 
         self.logger = logger
+        breakpoint()
 
     def log_table(self, tab):
         with io.StringIO() as s:
@@ -130,11 +133,27 @@ class Sync:
             s.seek(0)
             self.logger.info("\n" + s.read(-1))
 
+    def _archive_file_name(self, meta):
+        d = self.download_path
+        d = os.path.join(
+            self.download_path,
+            f"e{meta['RLEVEL']}",
+            meta["DATE_OBS"][:10].replace("-", ""),
+        )
+
+        # archive file name format:
+        # (site)(tel)-(instr)-YYYYMMDD-(frame)-(type)(red.level).fits
+        return os.path.join(d, meta["filename"])
+
+    def _archive_file_exists(self, meta):
+        fn = self._archive_file_name(meta)
+        return os.path.exists(fn)
+
     def _download_frame(self, meta):
         """Download a frame described by metadata from an LCO frame payload.
 
         Target location:
-          download_path/e(rlevel)/UTC_date/filename
+            download_path/e(rlevel)/UTC_date/filename
 
         If the file already exists, the download is skipped.
 
@@ -144,21 +163,12 @@ class Sync:
 
         """
 
-        # first, verify target path and create subdirectories if needed
-        d = self.download_path
-        for tail in (
-            "e{}".format(meta["RLEVEL"]),
-            meta["DATE_OBS"][:10].replace("-", ""),
-        ):
-            d = os.sep.join([d, tail])
-            if os.path.exists(d):
-                assert os.path.isdir(d), f"{d} exists, but is not a directory"
-            else:
-                os.mkdir(d)
+        filename = self._archive_file_name(meta)
 
-        # archive file name format:
-        # (site)(tel)-(instr)-YYYYMMDD-(frame)-(type)(red.level).fits
-        filename = os.sep.join([d, meta["filename"]])
+        # first, verify target path and create subdirectories if needed
+        path = pathlib.Path(filename)
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True)
 
         if os.path.exists(filename):
             self.logger.debug(f"{filename} already exists, skipping download.")
@@ -315,6 +325,7 @@ class Sync:
                 "RLEVEL": rlevel,
                 "start": start.iso[:10],
                 "format": "json",
+                "pagination_style": "cursor",
             }
             if self.object is not None:
                 query["OBJECT"] = self.object
@@ -323,43 +334,45 @@ class Sync:
                 query["end"] = end.iso[:10]
 
             data = self.request("https://archive-api.lco.global/frames/", query=query)
-            self.logger.debug(
-                "{} Found {} frames with reduction level {}.".format(
-                    Time.now().iso, data["count"], rlevel
-                )
-            )
+
+            if len(data["results"]) == 0 and data["next"] is None:
+                msg = "%s No data with reduction level %d found."
+            else:
+                msg = "%s Found frames with reduction level %d."
+
+            self.logger.debug(msg, Time.now().iso, rlevel)
 
             dl_count = 0
             skip_count = 0
             while True:  # loop over all payload sets
                 payload = data["results"]
 
-                if data["count"] > 0:
+                downloaded = []
+                if len(payload) > 0:
                     tab = self._summarize_payload(payload)
-                    if download:
-                        downloaded = []
-                        for i, meta in enumerate(payload):
-                            try:
-                                self._download_frame(meta)
-                                dl_count += 1
-                                downloaded.append(i)
-                            except ArchiveFileAlreadyExists:
-                                skip_count += 1
-                        if len(downloaded) > 0:
-                            # self.log_table(tab[downloaded])
-                            tab[downloaded].pprint_all()
-                    else:
-                        self.log_table(tab)
-                        tab.pprint_all()
+                    for i, meta in enumerate(payload):
+                        if self._archive_file_exists(meta):
+                            skip_count += 1
+                            continue
 
-                if data["next"] is not None:
-                    # get next payload set
-                    data = self.request(data["next"])
-                else:
+                        if download:
+                            self._download_frame(meta)
+
+                        dl_count += 1
+                        downloaded.append(i)
+
+                    if len(downloaded) > 0:
+                        tab[downloaded].pprint_all()
+
+                if data["next"] is None:
                     break  # end while loop
 
+                # get next payload set and continue loop
+                data = self.request(data["next"])
+
+            download_message = "Downloaded" if download else "Would have downloaded"
             self.logger.info(
-                f"{Time.now().iso} Downloaded {dl_count} files, {skip_count} skipped."
+                f"{Time.now().iso} {download_message} {dl_count} files, {skip_count} skipped."
             )
 
             if dl_count > 0 and self.post_sync is not None:
@@ -395,6 +408,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="show more messages on the console"
     )
+    parser.add_argument(
+        "--no-download",
+        dest="download",
+        action="store_false",
+        help="do not download any data, but just report what would have been downloaded",
+    )
     args = parser.parse_args()
 
     sync = Sync(
@@ -407,9 +426,9 @@ if __name__ == "__main__":
     )
     try:
         if args.continuous:
-            sync.continuous_sync()
+            sync.continuous_sync(download=args.download)
         else:
-            sync.sync(args.since)
+            sync.sync(args.since, download=args.download)
     except Exception as e:
         sync.logger.error(str(e))
         if args.verbose:
